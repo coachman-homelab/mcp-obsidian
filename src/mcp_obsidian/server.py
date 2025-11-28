@@ -1,23 +1,13 @@
-import json
 import logging
-from collections.abc import Sequence
-from functools import lru_cache
-from typing import Any
 import os
+import json
 from dotenv import load_dotenv
-from mcp.server import Server
-from mcp.types import (
-    Tool,
-    TextContent,
-    ImageContent,
-    EmbeddedResource,
-)
+from fastmcp import FastMCP, Context
 
-load_dotenv()
-
+# Import your existing tool definitions
 from . import tools
 
-# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,69 +15,54 @@ logger = logging.getLogger("mcp-obsidian")
 
 api_key = os.getenv("OBSIDIAN_API_KEY")
 if not api_key:
-    raise ValueError(f"OBSIDIAN_API_KEY environment variable required. Working directory: {os.getcwd()}")
+    raise ValueError(f"OBSIDIAN_API_KEY environment variable required.")
 
-app = Server("mcp-obsidian")
+# Initialize FastMCP instead of the raw Server
+mcp = FastMCP("mcp-obsidian")
 
-tool_handlers = {}
-def add_tool_handler(tool_class: tools.ToolHandler):
-    global tool_handlers
-
-    tool_handlers[tool_class.name] = tool_class
-
-def get_tool_handler(name: str) -> tools.ToolHandler | None:
-    if name not in tool_handlers:
-        return None
+# --- Bridge Logic ---
+# This helper function bridges your existing class-based tools 
+# to the FastMCP function-based system.
+def register_tool_handler(handler_class):
+    handler = handler_class()
+    tool_def = handler.get_tool_description()
     
-    return tool_handlers[name]
+    # We define a dynamic function that mimics the tool's signature
+    # This allows FastMCP to serve it correctly
+    async def wrapper(**kwargs):
+        try:
+            # Your handlers expect a specific input structure
+            result_list = handler.run_tool(kwargs)
+            # FastMCP expects a string or list of content. 
+            # Your tools return a list of [TextContent], so we extract the text.
+            if result_list and hasattr(result_list[0], 'text'):
+                return result_list[0].text
+            return "No content returned"
+        except Exception as e:
+            logger.error(str(e))
+            return f"Error: {str(e)}"
 
-add_tool_handler(tools.ListFilesInDirToolHandler())
-add_tool_handler(tools.ListFilesInVaultToolHandler())
-add_tool_handler(tools.GetFileContentsToolHandler())
-add_tool_handler(tools.SearchToolHandler())
-add_tool_handler(tools.PatchContentToolHandler())
-add_tool_handler(tools.AppendContentToolHandler())
-add_tool_handler(tools.PutContentToolHandler())
-add_tool_handler(tools.DeleteFileToolHandler())
-add_tool_handler(tools.ComplexSearchToolHandler())
-add_tool_handler(tools.BatchGetFileContentsToolHandler())
-add_tool_handler(tools.PeriodicNotesToolHandler())
-add_tool_handler(tools.RecentPeriodicNotesToolHandler())
-add_tool_handler(tools.RecentChangesToolHandler())
+    # Register the tool with FastMCP using the metadata from your existing classes
+    mcp.tool(
+        name=tool_def.name,
+        description=tool_def.description,
+    )(wrapper)
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    """List available tools."""
+# --- Register All Your Tools ---
+register_tool_handler(tools.ListFilesInDirToolHandler)
+register_tool_handler(tools.ListFilesInVaultToolHandler)
+register_tool_handler(tools.GetFileContentsToolHandler)
+register_tool_handler(tools.SearchToolHandler)
+register_tool_handler(tools.PatchContentToolHandler)
+register_tool_handler(tools.AppendContentToolHandler)
+register_tool_handler(tools.PutContentToolHandler)
+register_tool_handler(tools.DeleteFileToolHandler)
+register_tool_handler(tools.ComplexSearchToolHandler)
+register_tool_handler(tools.BatchGetFileContentsToolHandler)
+register_tool_handler(tools.PeriodicNotesToolHandler)
+register_tool_handler(tools.RecentPeriodicNotesToolHandler)
+register_tool_handler(tools.RecentChangesToolHandler)
 
-    return [th.get_tool_description() for th in tool_handlers.values()]
-
-@app.call_tool()
-async def call_tool(name: str, arguments: Any) -> Sequence[TextContent | ImageContent | EmbeddedResource]:
-    """Handle tool calls for command line run."""
-    
-    if not isinstance(arguments, dict):
-        raise RuntimeError("arguments must be dictionary")
-
-
-    tool_handler = get_tool_handler(name)
-    if not tool_handler:
-        raise ValueError(f"Unknown tool: {name}")
-
-    try:
-        return tool_handler.run_tool(arguments)
-    except Exception as e:
-        logger.error(str(e))
-        raise RuntimeError(f"Caught Exception. Error: {str(e)}")
-
-
-async def main():
-
-    # Import here to avoid issues with event loops
-    from mcp.server.stdio import stdio_server
-
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
+# FastMCP handles the execution loop automatically (supports both SSE and Stdio)
+if __name__ == "__main__":
+    mcp.run()
